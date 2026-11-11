@@ -106,7 +106,7 @@ class LogSimInterface {
     int lgs_O = 0;
     int lgs_g = 0;
     int lgs_L = 0;
-    double lgs_G = 0.04;
+    double lgs_G = -1; // negative selects the historical topology-specific default
     uint32_t lgs_S = 0;
     bool print_stats_flows = false;
 
@@ -118,8 +118,8 @@ class LogSimInterface {
     FatTreeTopology *_topo = NULL;
     std::vector<const Route *> ***_netPaths;
     int _cwd;
-    ComputeEvent *compute_events_handler;
-    NullEvent *null_events_handler;
+    ComputeEvent *compute_events_handler = nullptr;
+    NullEvent *null_events_handler = nullptr;
     graph_node_properties *_latest_recv;
     bool compute_if_finished = false;
     bool time_over = false;

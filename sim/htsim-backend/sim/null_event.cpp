@@ -9,6 +9,7 @@
 #include <regex>
 #include <stdio.h>
 #include <utility>
+#include <algorithm>
 
 #define timeInf 0
 
@@ -26,7 +27,11 @@ void NullEvent::doNextEvent() {
 }
 
 void NullEvent::setCompute(simtime_picosec computation_time) {
-    eventlist().sourceIsPendingRel(*this, computation_time * 1000 - eventlist().now()); // ns to ps
+    // LGS timestamps are integral ns, whereas Htsim can already be partway
+    // through that ns. A wakeup for floor(now/1000) must fire now, not in the
+    // past (and must not underflow an unsigned relative delay).
+    const simtime_picosec deadline = computation_time * 1000;
+    eventlist().sourceIsPending(*this, std::max(deadline, eventlist().now()));
 }
 
 void NullEvent::startComputations() { eventlist().doNextEvent(); }

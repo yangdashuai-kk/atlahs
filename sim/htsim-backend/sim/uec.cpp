@@ -980,7 +980,10 @@ void UecSink::receivePacket(Packet &pkt) {
     bool marked = p->flags() & ECN_CE;
 
     // TODO: consider different ways to select paths
-    auto crt_path = random() % 128;
+    // Use the configured slot count; matrix replay uses one transport slot
+    // while its topology independently selects global paths and link lanes.
+    assert(!_paths.empty());
+    auto crt_path = random() % _paths.size();
 
     // packet was trimmed
     if (pkt.header_only()) {

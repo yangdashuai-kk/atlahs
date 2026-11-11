@@ -17,6 +17,7 @@ class EventOver;
 class EqdsPullPacer;
 class EqdsNIC;
 class NdpPullPacer;
+class MatrixTopology;
 //class ComputeEvent;
 
 // Added FlowInfo class
@@ -69,6 +70,8 @@ public:
     // Getter and setter for FatTreeTopology
     void setTopology(FatTreeTopology* topo) { _topo = topo; }
     FatTreeTopology* getTopology() const { return _topo; }
+    void setMatrixTopology(MatrixTopology* topo) { _matrix_topo = topo; }
+    MatrixTopology* getMatrixTopology() const { return _matrix_topo; }
 
     // Getter and setter for LogSimInterface
     void setLogSimInterface(LogSimInterface* logsim_interface) { _logsim_interface = logsim_interface; }
@@ -120,25 +123,19 @@ public:
     void setGoalRankMapping(GoalRankMapping mapping) { goal_rank_mapping = mapping; }
     GoalRankMapping getGoalRankMapping() const { return goal_rank_mapping; }
 
-    void setGoalRankMappingFromBinaryHeader(uint32_t rank_count, int cpu_count, int nic_count) {
-        setNumberNic(nic_count);
-
-        // The binary GOAL format does not store the generator version. Infer
-        // the layout from the parsed schedule header instead: V1 unique-nic
-        // files keep ranks at node granularity and use several NICs per rank,
-        // while V2 files keep ranks at GPU/HTSIM-node granularity.
-        const bool looks_like_v2_gpu_rank =
-            nic_count == 1 ||
-            (nic_count == 2 && rank_count > static_cast<uint32_t>(nic_count) && cpu_count <= 8);
-        goal_rank_mapping =
-            looks_like_v2_gpu_rank ? GoalRankMapping::GpuRank : GoalRankMapping::UniqueNic;
-    }
+    void setGoalRankMappingFromBinaryHeader(uint32_t rank_count, int cpu_count, int nic_count);
+    // Opt-in placement for the native topology; preserve per-NIC endpoint mapping.
+    void loadNativeGoalServerMap(const std::string& filename);
+    void setGoalTransportPaths(uint32_t paths) { goal_transport_paths = paths; }
 
     bool usesUniqueNicRankMapping() const {
         return goal_rank_mapping == GoalRankMapping::UniqueNic;
     }
 
     const char* getGoalRankMappingName() const {
+        if (_matrix_topo) return "server-aggregated";
+        if (!native_goal_server_map.empty()) return usesUniqueNicRankMapping()
+            ? "server-nic-native" : "server-aggregated-native";
         switch (goal_rank_mapping) {
             case GoalRankMapping::UniqueNic:
                 return "unique-nic";
@@ -154,9 +151,7 @@ public:
     simtime_picosec getGlobalTimePs() const { return _eventlist->now(); }
     simtime_picosec getGlobalTimeNs() const { return _eventlist->now() / 1000; }
 
-    int getHtsimNodeNumber(int lgs_host, int lgs_nic) {
-        return usesUniqueNicRankMapping() ? lgs_host * number_nics + lgs_nic : lgs_host;
-    }
+    int getHtsimNodeNumber(int lgs_host, int lgs_nic);
 
     linkspeed_bps linkspeed; // TO DO
     int linkspeed_gbps = 100; // TO DO
@@ -171,6 +166,7 @@ private:
     EventList* _eventlist = nullptr;
     UecRtxTimerScanner* _uecRtxScanner = nullptr;
     FatTreeTopology* _topo = nullptr;
+    MatrixTopology* _matrix_topo = nullptr;
     LogSimInterface* _logsim_interface = nullptr;
     ComputeEvent *compute_events_handler = nullptr;
     NullEvent *null_events_handler = nullptr;
@@ -178,6 +174,8 @@ private:
     // LGS Specific
     int number_nics = 1;
     GoalRankMapping goal_rank_mapping = GoalRankMapping::GpuRank;
+    std::vector<uint32_t> native_goal_server_map;
+    uint32_t goal_transport_paths = 0; // 0 preserves the topology-specific default
 
     // EQDS Specific 
     vector<EqdsPullPacer*> pacersEQDS;

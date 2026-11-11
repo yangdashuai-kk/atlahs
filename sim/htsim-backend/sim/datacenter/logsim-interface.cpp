@@ -8,6 +8,7 @@
 #include "lgs/TimelineVisualization.hpp"
 #include "lgs/cmdline.h"
 #include "main.h"
+#include "matrix_topology.h"
 #include "topology.h"
 #include <chrono>
 #include <filesystem>
@@ -134,8 +135,8 @@ void LogSimInterface::send_event(graph_node_properties elem) {
     active_sends[to_hash] = entry; */
 
     // Testing New 
-    SendEvent* event = new SendEvent(elem.host, elem.target, elem.size, elem.tag, htsim_api->getGlobalTimeNs());    
-    htsim_api->Send(*event, elem);
+    SendEvent event(elem.host, elem.target, elem.size, elem.tag, htsim_api->getGlobalTimeNs());
+    htsim_api->Send(event, elem);
 
     /* printf("LGS Send Event - Time %lu - Host %d - Dst %d - Tag %d - Size %d - "
            "StartTime %d\n",
@@ -161,7 +162,6 @@ void LogSimInterface::flow_over(const EventOver &event) {
   // active_sends[to_hash].bytes_left_to_recv = 0;
   // Here we have received a message fully, we need to give control back to
   // LGS
-  _latest_recv = new graph_node_properties();
   _latest_recv->updated = true;
   _latest_recv->tag = event.node->tag;
   _latest_recv->type = OP_MSG;
@@ -217,6 +217,10 @@ void LogSimInterface::htsim_simulate_until(int64_t until) {
     }
 
     have_more = false;
+    const auto pending_at_current_time = [this]() {
+        const EventList::pendingsources_t pending = _eventlist->getPendingSources();
+        return !pending.empty() && pending.begin()->first == _eventlist->now();
+    };
 
     //printf("Size eventlist is %lu\n", _eventlist->getPendingSources().size());
 
@@ -225,7 +229,7 @@ void LogSimInterface::htsim_simulate_until(int64_t until) {
         if (htsim_api->send_done_return_control) {
             htsim_api->send_done_return_control = false;
 
-            if (_eventlist->now() == _eventlist->getPendingSources().begin()->first) {
+            if (pending_at_current_time()) {
               have_more = true;
             }
             break;
@@ -234,14 +238,14 @@ void LogSimInterface::htsim_simulate_until(int64_t until) {
         //printf("While3 - Time is %lu - Have More %d\n", _eventlist->now(), have_more);
         if (_latest_recv->updated) {
           this->reset_latest_receive();
-          if (_eventlist->now() == _eventlist->getPendingSources().begin()->first) {
+          if (pending_at_current_time()) {
             have_more = true;
           }
             break;
         }
 
         if (compute_if_finished) {
-          if (_eventlist->now() == _eventlist->getPendingSources().begin()->first) {
+          if (pending_at_current_time()) {
             have_more = true;
           }
             compute_if_finished = false;
@@ -361,7 +365,12 @@ int start_lgs(std::string filename_goal, LogSimInterface &lgs) {
     const int O = 0;
     const int g = 0;
     const int L = 0;
-    const double G = 0.04;
+    // In matrix mode the Htsim queues enforce NIC and link serialization.
+    // An additional fixed 200-Gbps LGS bandwidth gate would cap experiments
+    // independently of the requested link count and rate.
+    const double G = lgs_interface->lgs_G >= 0 ? lgs_interface->lgs_G
+        : (lgs_interface->htsim_api->getMatrixTopology() ? 0.0 : 0.04);
+    printf("[ATLAHS] LGS bandwidth gap: %.9g ns/byte\n", G);
     print = false;
     const uint32_t S = 0;
     bool custom_print = false;
@@ -380,12 +389,15 @@ int start_lgs(std::string filename_goal, LogSimInterface &lgs) {
     const int nnics = parser.GetNumNIC();
     lgs_interface->htsim_api->setGoalRankMappingFromBinaryHeader(
         static_cast<uint32_t>(p), ncpus, nnics);
+    const uint32_t htsim_nodes = lgs_interface->htsim_api->getMatrixTopology()
+        ? lgs_interface->htsim_api->getMatrixTopology()->no_of_nodes()
+        : (lgs_interface->htsim_api->usesUniqueNicRankMapping() ? p * nnics : p);
     printf("[ATLAHS] GOAL rank mapping: %s (LGS ranks=%u, CPUs=%d, NICs=%d, HTSIM nodes=%u)\n",
            lgs_interface->htsim_api->getGoalRankMappingName(),
            p,
            ncpus,
            nnics,
-           lgs_interface->htsim_api->usesUniqueNicRankMapping() ? p * nnics : p);
+           htsim_nodes);
     bool comm_dep_file_arg = false;
 
     // DATA structures for storing MPI matching statistics
@@ -530,8 +542,6 @@ int start_lgs(std::string filename_goal, LogSimInterface &lgs) {
       
       std::unordered_set<int> check_hosts;
         // get the next element from the queue
-        graph_node_properties elem = lgs_interface->aq.top();
-
         while (!lgs_interface->aq.empty() && !lgs_interface->have_more && lgs_interface->aq.top().time <= (lgs_interface->htsim_api->getGlobalTimeNs())) {   
           /* printf("Active Queue Size %d - Type %d - Host %d - CPU %d - Tag %d - Top Time %lu -- Size RQ %d -- Size UQ %d\n",
             (int)lgs_interface->aq.size(), lgs_interface->aq.top().type, lgs_interface->aq.top().host, lgs_interface->aq.top().proc, lgs_interface->aq.top().tag, lgs_interface->aq.top().time, 
@@ -953,7 +963,7 @@ int start_lgs(std::string filename_goal, LogSimInterface &lgs) {
         }
       }
 
-      if (custom_print) {
+      if (custom_print && !lgs_interface->aq.empty()) {
         printf("1) Sends Active %d - Compute Started %d\n", lgs_interface->sends_active, lgs_interface->compute_started);
         printf("1) Can Simulate Until %" PRId64 " - Top Time %lu\n", can_simulate_until, lgs_interface->aq.top().time);
       }
@@ -965,10 +975,10 @@ int start_lgs(std::string filename_goal, LogSimInterface &lgs) {
               just_running = true;
           }
       } 
-      if (custom_print) {
+      if (custom_print && !lgs_interface->aq.empty()) {
         printf("2) Time %lu > htsim time %lu, unlocked_elem %d, just_running %d\n", lgs_interface->aq.top().time, lgs_interface->htsim_api->getGlobalTimeNs(), unlocked_elem, just_running);
       }
-      if (lgs_interface->aq.top().time > (lgs_interface->htsim_api->getGlobalTimeNs()) && !unlocked_elem && !just_running) { // Let htim catchup
+      if (!lgs_interface->aq.empty() && lgs_interface->aq.top().time > (lgs_interface->htsim_api->getGlobalTimeNs()) && !unlocked_elem && !just_running) { // Let htim catchup
         lgs_interface->htsim_simulate_until(lgs_interface->aq.top().time);
       }
 

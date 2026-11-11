@@ -5,6 +5,7 @@
 #include "randomqueue.h"
 #include <iostream>
 #include <math.h>
+#include <cmath>
 
 #include <sstream>
 #include <string.h>
@@ -17,6 +18,7 @@
 #include "logfile.h"
 #include "loggers.h"
 #include "logsim-interface.h"
+#include "matrix_topology.h"
 #include "pipe.h"
 #include "shortflows.h"
 #include "topology.h"
@@ -127,6 +129,13 @@ int main(int argc, char **argv) {
     bool stop_after_quick = false;
     char *tm_file = NULL;
     char* topo_file = NULL;
+    char* matrix_file = NULL;
+    char* routes_file = NULL;
+    char* rank_server_map_file = NULL;
+    char* native_goal_server_map_file = NULL;
+    int goal_transport_paths = 0;
+    double lgs_gap_per_byte = -1;
+    int sim_end_seconds = 60;
     bool use_pacing = false;
     int precision_ts = 1;
     int once_per_rtt = 0;
@@ -186,6 +195,42 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i],"-topo")){
             topo_file = argv[i+1];
             cout << "FatTree topology input file: "<< topo_file << endl;
+            i++;
+        } else if (!strcmp(argv[i], "-matrix")) {
+            matrix_file = argv[i + 1];
+            cout << "Server adjacency matrix: " << matrix_file << endl;
+            i++;
+        } else if (!strcmp(argv[i], "-routes")) {
+            routes_file = argv[i + 1];
+            cout << "Global route table: " << routes_file << endl;
+            i++;
+        } else if (!strcmp(argv[i], "-rank_server_map")) {
+            rank_server_map_file = argv[i + 1];
+            cout << "GOAL rank-to-server map: " << rank_server_map_file << endl;
+            i++;
+        } else if (!strcmp(argv[i], "-goal_server_map")) {
+            native_goal_server_map_file = argv[i + 1];
+            i++;
+        } else if (!strcmp(argv[i], "-goal_transport_paths")) {
+            goal_transport_paths = atoi(argv[i + 1]);
+            if (goal_transport_paths <= 0) {
+                std::cerr << "-goal_transport_paths must be positive" << std::endl;
+                return 1;
+            }
+            i++;
+        } else if (!strcmp(argv[i], "-lgs_gap_per_byte")) {
+            lgs_gap_per_byte = std::stod(argv[i + 1]);
+            if (!std::isfinite(lgs_gap_per_byte) || lgs_gap_per_byte < 0) {
+                std::cerr << "-lgs_gap_per_byte must be finite and nonnegative" << std::endl;
+                return 1;
+            }
+            i++;
+        } else if (!strcmp(argv[i], "-sim_end_seconds")) {
+            sim_end_seconds = atoi(argv[i + 1]);
+            if (sim_end_seconds <= 0 || sim_end_seconds > 86400) {
+                std::cerr << "-sim_end_seconds must be in 1..86400" << std::endl;
+                return 1;
+            }
             i++;
         } else if (!strcmp(argv[i], "-stop_pacing_after_rtt")) {
             stop_pacing_after_rtt = atoi(argv[i + 1]);
@@ -607,7 +652,7 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    eventlist.setEndtime(timeFromSec((uint32_t)60));
+    eventlist.setEndtime(timeFromSec((uint32_t)sim_end_seconds));
 
     // Calculate Network Info
     int hops = 4; // hardcoded for now
@@ -892,8 +937,30 @@ int main(int argc, char **argv) {
     } else if (goal_filename.size() > 0) {
         printf("Starting LGS Interface");
 
-        if (topo_file) {
+        MatrixTopology* matrix_top = NULL;
+        if (matrix_file != NULL) {
+            if (topo_file != NULL) {
+                std::cerr << "Use either -topo or -matrix, not both" << std::endl;
+                return 1;
+            }
+            try {
+                matrix_top = MatrixTopology::load(matrix_file, routes_file,
+                                                  rank_server_map_file, eventlist,
+                                                  linkspeed, queuesize, hop_latency,
+                                                  switch_latency);
+            } catch (const std::exception& error) {
+                std::cerr << "Failed to load matrix topology: " << error.what() << std::endl;
+                return 1;
+            }
+            no_of_nodes = matrix_top->no_of_nodes();
+            std::cout << "Trace replay will use " << no_of_nodes
+                      << " server-level Htsim nodes" << std::endl;
+        } else if (routes_file != NULL || rank_server_map_file != NULL) {
+            std::cerr << "-routes and -rank_server_map require -matrix" << std::endl;
+            return 1;
+        } else if (topo_file) {
             top = FatTreeTopology::load(topo_file, NULL, eventlist, queuesize, qt, snd_type);
+            no_of_nodes = top->no_of_nodes();
         } else {
             FatTreeTopology::set_tiers(3);
             top = new FatTreeTopology(no_of_nodes, linkspeed, queuesize, NULL, 
@@ -903,7 +970,17 @@ int main(int argc, char **argv) {
         }
 
         AtlahsHtsimApi *api = new AtlahsHtsimApi();
-        api->setTopology(top);
+        if (matrix_top != NULL) api->setMatrixTopology(matrix_top);
+        else api->setTopology(top);
+        if (native_goal_server_map_file) {
+            try {
+                api->loadNativeGoalServerMap(native_goal_server_map_file);
+            } catch (const std::exception& error) {
+                std::cerr << error.what() << std::endl;
+                return 1;
+            }
+        }
+        if (goal_transport_paths) api->setGoalTransportPaths(goal_transport_paths);
         api->setEventList(&eventlist);
         api->setComputeEvent(new ComputeEvent(eventlist));
         api->setNullEvent(new NullEvent(eventlist));
@@ -925,6 +1002,7 @@ int main(int argc, char **argv) {
         lgs->lgs_O = lgs_O;
         lgs->lgs_o = lgs_o;
         lgs->lgs_g = lgs_g;
+        lgs->lgs_G = lgs_gap_per_byte;
 
         lgs->htsim_api->total_nodes = no_of_nodes;
         lgs->htsim_api->setSenderCwnd(bdp_local);

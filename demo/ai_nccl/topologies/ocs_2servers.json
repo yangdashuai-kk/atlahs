@@ -1,0 +1,16 @@
+{
+  "config": {
+    "num_servers": 2,
+    "num_ocs": 1,
+    "dp_group_count": 0,
+    "pp_group_count": 1
+  },
+  "format": "row-major link counts: flat[source * num_servers + target]",
+  "server_groups": {
+    "DP": [],
+    "PP": [[0, 1]]
+  },
+  "DP": [0, 0, 0, 0],
+  "PP": [0, 1, 1, 0],
+  "global": [0, 1, 1, 0]
+}
